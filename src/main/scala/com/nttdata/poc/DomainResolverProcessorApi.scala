@@ -43,6 +43,7 @@ class DomainResolverProcessorApi(bootstrapServers: String, sourceTopic: String, 
 
     val topicConfigs: util.Map[String, String] = new util.HashMap[String, String]
     // topicConfigs.put("min.insync.replicas", "2"); // TODO
+    // topicConfigs.put(RETENTION_MS_CONFIG, Long.toString(domainTtlMillis)); // TODO
 
     val storeBuilder = Stores.keyValueStoreBuilder(
       Stores.persistentKeyValueStore("domain-store"),
