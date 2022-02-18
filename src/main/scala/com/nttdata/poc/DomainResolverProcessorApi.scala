@@ -4,20 +4,18 @@ import com.nttdata.poc.model.{Activity, ActivityEnriched, Domain, JsonSerDes}
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.streams.KafkaStreams.State.REBALANCING
 import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD
+import org.apache.kafka.streams.processor.{Cancellable, PunctuationType, Punctuator}
 import org.apache.kafka.streams.processor.api.{Processor, ProcessorContext, Record}
-import org.apache.kafka.streams.state.{KeyValueStore, Stores}
-import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
+import org.apache.kafka.streams.state.{KeyValueIterator, KeyValueStore, Stores}
+import org.apache.kafka.streams.{KafkaStreams, KeyValue, StreamsConfig, Topology}
 import sttp.client3.{HttpURLConnectionBackend, UriContext, basicRequest}
 
-import java.util.Properties
+import java.time.{Duration, Instant}
+import java.util
+import java.util.{HashMap, Map, Properties}
 
-class DomainResolverProcessorApi(bootstrapServers: String,
-                                 sourceTopic: String,
-                                 destTopic: String,
-                                 stateDir: String,
-                                 apiKey: String) {
-
-  val payload: String = "{\n" + "  \"client\": {\n" + "    \"clientId\": \"cmp\",\n" + "    \"clientVersion\": \"1.5.2\"\n" + "  },\n" + "  \"threatInfo\": {\n" + "    \"threatTypes\": [\n" + "      \"MALWARE\",\n" + "      \"SOCIAL_ENGINEERING\",\n" + "      \"THREAT_TYPE_UNSPECIFIED\"\n" + "    ],\n" + "    \"platformTypes\": [\n" + "      \"ALL_PLATFORMS\"\n" + "    ],\n" + "    \"threatEntryTypes\": [\n" + "      \"URL\"\n" + "    ],\n" + "    \"threatEntries\": [\n" + "      {\n" + "        \"url\": \"%DOMAIN%\"\n" + "      }\n" + "    ]\n" + "  }\n" + "}";
+class DomainResolverProcessorApi(bootstrapServers: String, sourceTopic: String, destTopic: String,
+                                 stateDir: String, apiKey: String, periodTtl: Long, domainTtlMillis: Long) {
 
   def start(): Unit = {
 
@@ -41,12 +39,15 @@ class DomainResolverProcessorApi(bootstrapServers: String,
     )
 
     builder.addProcessor("Activity processor",
-      () => new ActivityProcessor(), "Activity")
+      () => new ActivityProcessor(apiKey, periodTtl, domainTtlMillis), "Activity")
+
+    val topicConfigs: util.Map[String, String] = new util.HashMap[String, String]
+    // topicConfigs.put("min.insync.replicas", "2"); // TODO
 
     val storeBuilder = Stores.keyValueStoreBuilder(
       Stores.persistentKeyValueStore("domain-store"),
       Serdes.String,
-      JsonSerDes.domain())
+      JsonSerDes.domain()).withLoggingEnabled(topicConfigs)
 
     builder.addStateStore(storeBuilder, "Activity processor")
 
@@ -54,53 +55,6 @@ class DomainResolverProcessorApi(bootstrapServers: String,
       JsonSerDes.activityEnriched().serializer,
       "Activity processor")
     builder
-  }
-
-  class ActivityProcessor extends Processor[String, Activity, String, ActivityEnriched] {
-    var context: ProcessorContext[String, ActivityEnriched] = _
-    var kvStore: KeyValueStore[String, Domain] = _
-
-    override def init(c: ProcessorContext[String, ActivityEnriched]): Unit = {
-      context = c
-      kvStore = context.getStateStore("domain-store")
-    }
-
-    override def process(record: Record[String, Activity]): Unit = {
-
-      val activity = record.value()
-      val domainStr = activity.domain
-      val opt = Option(kvStore.get(domainStr))
-      opt match {
-        case None =>
-          try {
-            val p = payload.replaceAll("%DOMAIN%", domainStr)
-            val request = basicRequest
-              .body(p)
-              .acceptEncoding("application/json")
-              .contentType("application/json")
-              .post(uri"https://safebrowsing.googleapis.com/v4/threatMatches:find?key=$apiKey")
-            val backend = HttpURLConnectionBackend()
-            val response = request.send(backend)
-            val suspect = response.body match {
-              case Right(c) => !c.startsWith("{}")
-              case _ => true
-            }
-            kvStore.put(domainStr, Domain(activity.domain, suspect))
-          }
-          catch {
-            case _: Throwable => kvStore.put(domainStr, Domain(activity.domain, suspect = true))
-          }
-        case Some(v) =>
-          val activityEnriched = ActivityEnriched(activity, v.suspect)
-          context.forward(new Record[String, ActivityEnriched](record.key, activityEnriched,
-            record.timestamp))
-      }
-    }
-
-    def get(k: String): Option[Domain] = {
-      val s = kvStore.get(k)
-      Option(s)
-    }
   }
 
   def properties(): Properties = {
@@ -112,16 +66,88 @@ class DomainResolverProcessorApi(bootstrapServers: String,
   }
 }
 
+class ActivityProcessor(apiKey:String, periodTtl: Long, domainTtlMillis: Long)
+  extends Processor[String, Activity, String, ActivityEnriched] {
+
+  val payload: String = "{\n" + "  \"client\": {\n" + "    \"clientId\": \"cmp\",\n" + "    \"clientVersion\": \"1.5.2\"\n" + "  },\n" + "  \"threatInfo\": {\n" + "    \"threatTypes\": [\n" + "      \"MALWARE\",\n" + "      \"SOCIAL_ENGINEERING\",\n" + "      \"THREAT_TYPE_UNSPECIFIED\"\n" + "    ],\n" + "    \"platformTypes\": [\n" + "      \"ALL_PLATFORMS\"\n" + "    ],\n" + "    \"threatEntryTypes\": [\n" + "      \"URL\"\n" + "    ],\n" + "    \"threatEntries\": [\n" + "      {\n" + "        \"url\": \"%DOMAIN%\"\n" + "      }\n" + "    ]\n" + "  }\n" + "}";
+
+  var context: ProcessorContext[String, ActivityEnriched] = _
+  var kvStore: KeyValueStore[String, Domain] = _
+  var punctuator: Cancellable = _
+
+  override def init(c: ProcessorContext[String, ActivityEnriched]): Unit = {
+    context = c
+    kvStore = context.getStateStore("domain-store")
+    punctuator = this.context.schedule(Duration.ofMillis(periodTtl),
+      PunctuationType.WALL_CLOCK_TIME, new ActivityPunctuator())
+  }
+
+  override def process(record: Record[String, Activity]): Unit = {
+
+    val activity = record.value()
+    val domainStr = activity.domain
+    val opt = Option(kvStore.get(domainStr))
+    opt match {
+      case None =>
+        try {
+          val p = payload.replaceAll("%DOMAIN%", domainStr)
+          val request = basicRequest
+            .body(p)
+            .acceptEncoding("application/json")
+            .contentType("application/json")
+            .post(uri"https://safebrowsing.googleapis.com/v4/threatMatches:find?key=$apiKey")
+          val response = request.send(HttpURLConnectionBackend())
+          val suspect = response.body match {
+            case Right(c) => !c.startsWith("{}")
+            case _ => true
+          }
+          kvStore.put(domainStr, Domain(activity.domain, suspect))
+        }
+        catch {
+          case _: Throwable => kvStore.put(domainStr, Domain(activity.domain, suspect = true))
+        }
+      case Some(v) =>
+        val activityEnriched = ActivityEnriched(activity, v.suspect)
+        context.forward(new Record[String, ActivityEnriched](record.key, activityEnriched,
+          record.timestamp))
+    }
+  }
+
+  class ActivityPunctuator extends Punctuator {
+    override def punctuate(timestamp: Long): Unit = {
+      try {
+        val iter = kvStore.all
+        try while ( {iter.hasNext}) {
+          val entry = iter.next
+          val lastDomain = entry.value
+          if (lastDomain != null) {
+            val lastUpdated = Instant.parse(lastDomain.timestamp)
+            val millisFromLastUpdate = Duration.between(lastUpdated, Instant.now).toMillis
+            if (millisFromLastUpdate >= domainTtlMillis) kvStore.delete(entry.key)
+          }
+        }
+        finally if (iter != null) iter.close()
+      }
+    }
+  }
+
+  override def close(): Unit = {
+    punctuator.cancel()
+  }
+}
+
 object Runner {
 
   def main(a: Array[String]): Unit = {
     val bootstrapServers = a(0)
     val sourceTopic = a(1)
     val destTopic = a(2)
-    val domainsTopic = a(3) // Non serve, la gestione dello State Store è manuale
-    val stateDir = a(4)
-    val apiKey = a(5)
-    val resolver = new DomainResolverProcessorApi(bootstrapServers, sourceTopic, destTopic, stateDir, apiKey)
+    val stateDir = a(3)
+    val apiKey = a(4)
+    val periodTtl = a(5).toLong
+    val ttl = a(6).toLong
+    val resolver = new DomainResolverProcessorApi(bootstrapServers, sourceTopic, destTopic,
+      stateDir, apiKey, periodTtl, ttl)
     resolver.start()
   }
 }

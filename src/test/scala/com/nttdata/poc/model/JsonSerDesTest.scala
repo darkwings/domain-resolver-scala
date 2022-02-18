@@ -6,8 +6,8 @@ import org.scalatest.wordspec.AnyWordSpec
 
 class JsonSerDesTest extends AnyWordSpec {
 
-  "JsonSerDes" can {
-    "Activity" should {
+  "JsonSerDes" should {
+    "let Activity" should {
       "be serialized upper case" in {
         val activity = Activity("id", "user", "cn", "201", "a@b.it", "101.1.1.0", "www.a.it",
           Location("a", "b", 100.0, 200.0), "message", "action")

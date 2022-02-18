@@ -11,8 +11,7 @@ case class Location(@(SerializedName @scala.annotation.meta.field)("CITY") city:
                     @(SerializedName @scala.annotation.meta.field)("LATITUDE") latitude: Double,
                     @(SerializedName @scala.annotation.meta.field)("LONGITUDE") Longitude: Double)
 
-case class Domain(@(SerializedName @scala.annotation.meta.field)("DOMAIN") domain: String,
-                  @(SerializedName @scala.annotation.meta.field)("SUSPECT") suspect: Boolean)
+case class Domain(domain: String, suspect: Boolean, timestamp: String)
 
 case class Activity(@(SerializedName @scala.annotation.meta.field)("ACTIVITYID") activityId: String,
                     @(SerializedName @scala.annotation.meta.field)("USERID") userId: String,
