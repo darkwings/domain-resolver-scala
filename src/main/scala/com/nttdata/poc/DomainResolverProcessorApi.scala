@@ -27,6 +27,10 @@ class DomainResolverProcessorApi(bootstrapServers: String, sourceTopic: String, 
       }
     })
     streams.start()
+
+    sys.ShutdownHookThread {
+      streams.close()
+    }
   }
 
   def createTopology(): Topology = {
