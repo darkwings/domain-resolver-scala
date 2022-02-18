@@ -5,13 +5,14 @@ import com.google.gson.{FieldNamingPolicy, Gson, GsonBuilder}
 import org.apache.kafka.common.serialization.{Deserializer, Serde, Serdes, Serializer}
 
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 
 case class Location(@(SerializedName @scala.annotation.meta.field)("CITY") city: String,
                     @(SerializedName @scala.annotation.meta.field)("STATE") state: String,
                     @(SerializedName @scala.annotation.meta.field)("LATITUDE") latitude: Double,
                     @(SerializedName @scala.annotation.meta.field)("LONGITUDE") Longitude: Double)
 
-case class Domain(domain: String, suspect: Boolean, timestamp: String)
+case class Domain(domain: String, suspect: Boolean, timestamp: String = Instant.now().toString)
 
 case class Activity(@(SerializedName @scala.annotation.meta.field)("ACTIVITYID") activityId: String,
                     @(SerializedName @scala.annotation.meta.field)("USERID") userId: String,
