@@ -194,6 +194,11 @@ class DomainResolver(conf: ServiceConf) {
   }
 }
 
+/**
+ * Questa classe va customizzata sulla base delle singole esigenze
+ *
+ * @param conf la configurazione del servizio
+ */
 class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEnriched, IntermediateResult[ActivityEnriched, Domain]] {
 
   val payload: String = "{\n" + "  \"client\": {\n" + "    \"clientId\": \"cmp\",\n" + "    \"clientVersion\": \"1.5.2\"\n" + "  },\n" + "  \"threatInfo\": {\n" + "    \"threatTypes\": [\n" + "      \"MALWARE\",\n" + "      \"SOCIAL_ENGINEERING\",\n" + "      \"THREAT_TYPE_UNSPECIFIED\"\n" + "    ],\n" + "    \"platformTypes\": [\n" + "      \"ALL_PLATFORMS\"\n" + "    ],\n" + "    \"threatEntryTypes\": [\n" + "      \"URL\"\n" + "    ],\n" + "    \"threatEntries\": [\n" + "      {\n" + "        \"url\": \"%DOMAIN%\"\n" + "      }\n" + "    ]\n" + "  }\n" + "}";
@@ -217,11 +222,12 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
       case None =>
         try {
           val p = payload.replaceAll("%DOMAIN%", domainStr)
+          val url = conf.externalSystem.endpointUrl.replaceAll("%APIKEY%", apiKey)
           val request = basicRequest
             .body(p)
             .acceptEncoding("application/json")
             .contentType("application/json")
-            .post(uri"https://safebrowsing.googleapis.com/v4/threatMatches:find?key=$apiKey")
+            .post(uri"$url")
           val response = request.send(HttpURLConnectionBackend())
           val suspect = response.body match {
             case Right(c) => !c.startsWith("{}")
