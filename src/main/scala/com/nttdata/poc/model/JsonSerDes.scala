@@ -23,11 +23,18 @@ case class Activity(@(SerializedName @scala.annotation.meta.field)("ACTIVITYID")
                     @(SerializedName @scala.annotation.meta.field)("DOMAIN") domain: String,
                     @(SerializedName @scala.annotation.meta.field)("LOCATION") location: Location,
                     @(SerializedName @scala.annotation.meta.field)("MESSAGE") message: String,
+                    @(SerializedName @scala.annotation.meta.field)("DATE") timestamp: String,
                     @(SerializedName @scala.annotation.meta.field)("ACTION") action:String)
 
 case class ActivityEnriched(@(SerializedName @scala.annotation.meta.field)("ACTIVITY") activity: Activity,
                             @(SerializedName @scala.annotation.meta.field)("SUSPECT") suspect: Boolean)
 
+object ActivityEnriched {
+
+  def apply(activity: Activity): ActivityEnriched = {
+    new ActivityEnriched(activity, null)
+  }
+}
 
 object JsonSerDes {
 

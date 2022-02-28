@@ -4,15 +4,15 @@ import com.nttdata.poc.model.{Activity, ActivityEnriched, Domain, JsonSerDes}
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.streams.KafkaStreams.State.REBALANCING
 import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD
-import org.apache.kafka.streams.processor.{Cancellable, PunctuationType, Punctuator}
 import org.apache.kafka.streams.processor.api.{Processor, ProcessorContext, Record}
-import org.apache.kafka.streams.state.{KeyValueIterator, KeyValueStore, Stores}
-import org.apache.kafka.streams.{KafkaStreams, KeyValue, StreamsConfig, Topology}
+import org.apache.kafka.streams.processor.{Cancellable, PunctuationType, Punctuator}
+import org.apache.kafka.streams.state.{KeyValueStore, Stores}
+import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
 import sttp.client3.{HttpURLConnectionBackend, UriContext, basicRequest}
 
 import java.time.{Duration, Instant}
 import java.util
-import java.util.{HashMap, Map, Properties}
+import java.util.Properties
 
 class DomainResolverProcessorApi(bootstrapServers: String, sourceTopic: String, destTopic: String,
                                  stateDir: String, apiKey: String, periodTtl: Long, domainTtlMillis: Long) {
@@ -28,9 +28,7 @@ class DomainResolverProcessorApi(bootstrapServers: String, sourceTopic: String, 
     })
     streams.start()
 
-    sys.ShutdownHookThread {
-      streams.close()
-    }
+    sys.ShutdownHookThread {streams.close()}
   }
 
   def createTopology(): Topology = {
@@ -49,6 +47,11 @@ class DomainResolverProcessorApi(bootstrapServers: String, sourceTopic: String, 
     // topicConfigs.put("min.insync.replicas", "2"); // TODO
     // topicConfigs.put(RETENTION_MS_CONFIG, Long.toString(domainTtlMillis)); // TODO
 
+    // TODO il problema qui è che la chiave dello store non è la partition key, per cui
+    //    lo store non è partizionato correttamente, tutte le istanze potrebbero avere gli
+    //    stessi dati. Alternativa, fare qualcosa del genere, ma a quel punto meglio DSL e selectKey
+    //    topology.addSink(...); write to new topic for repartitioning
+    //    topology.addSource(...); // read from repartition topic
     val storeBuilder = Stores.keyValueStoreBuilder(
       Stores.persistentKeyValueStore("domain-store"),
       Serdes.String,
@@ -141,18 +144,18 @@ class ActivityProcessor(apiKey:String, periodTtl: Long, domainTtlMillis: Long)
   }
 }
 
-object Runner {
-
-  def main(a: Array[String]): Unit = {
-    val bootstrapServers = a(0)
-    val sourceTopic = a(1)
-    val destTopic = a(2)
-    val stateDir = a(3)
-    val apiKey = a(4)
-    val periodTtl = a(5).toLong
-    val ttl = a(6).toLong
-    val resolver = new DomainResolverProcessorApi(bootstrapServers, sourceTopic, destTopic,
-      stateDir, apiKey, periodTtl, ttl)
-    resolver.start()
-  }
-}
+//object Runner {
+//
+//  def main(a: Array[String]): Unit = {
+//    val bootstrapServers = a(0)
+//    val sourceTopic = a(1)
+//    val destTopic = a(2)
+//    val stateDir = a(3)
+//    val apiKey = a(4)
+//    val periodTtl = a(5).toLong
+//    val ttl = a(6).toLong
+//    val resolver = new DomainResolverProcessorApi(bootstrapServers, sourceTopic, destTopic,
+//      stateDir, apiKey, periodTtl, ttl)
+//    resolver.start()
+//  }
+//}
