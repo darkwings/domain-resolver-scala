@@ -26,13 +26,19 @@ case class Activity(@(SerializedName @scala.annotation.meta.field)("ACTIVITYID")
                     @(SerializedName @scala.annotation.meta.field)("DATE") timestamp: String,
                     @(SerializedName @scala.annotation.meta.field)("ACTION") action:String)
 
+
+
 case class ActivityEnriched(@(SerializedName @scala.annotation.meta.field)("ACTIVITY") activity: Activity,
-                            @(SerializedName @scala.annotation.meta.field)("SUSPECT") suspect: Boolean)
+                            @(SerializedName @scala.annotation.meta.field)("SUSPECT") suspect: Boolean) {
+  var lookupComplete:Boolean = true
+}
 
 object ActivityEnriched {
 
   def apply(activity: Activity): ActivityEnriched = {
-    new ActivityEnriched(activity, null)
+    val a = new ActivityEnriched(activity, false)
+    a.lookupComplete = false
+    a
   }
 }
 

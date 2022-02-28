@@ -8,7 +8,7 @@ import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.KafkaStreams.State.REBALANCING
 import org.apache.kafka.streams.StreamsConfig.{APPLICATION_ID_CONFIG, BOOTSTRAP_SERVERS_CONFIG, STATE_DIR_CONFIG}
 import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD
-import org.apache.kafka.streams.kstream.{Branched, Consumed, Joined, KStream, KTable, Materialized, Named, Predicate, Produced, ValueTransformer, ValueTransformerSupplier}
+import org.apache.kafka.streams.kstream.{Branched, Consumed, Joined, KStream, KTable, Materialized, Named, Predicate, Produced, ValueJoiner, ValueTransformer, ValueTransformerSupplier}
 import org.apache.kafka.streams.processor.{Cancellable, ProcessorContext, PunctuationType, Punctuator, TimestampExtractor}
 import org.apache.kafka.streams.state.KeyValueStore
 import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, Topology}
@@ -42,7 +42,9 @@ case class IntermediateResult[A, L](enrichedData: A, lookup: L, state: Intermedi
 
 class DomainResolver(conf: ServiceConf) {
 
-  val logger: Logger = Logger("name")
+  val logger: Logger = Logger("DomainResolver")
+  val STORE_NAME: String = "domain-store"
+
 
   def start(): Unit = {
     val streams = new KafkaStreams(createTopology(conf), properties(conf))
@@ -60,12 +62,13 @@ class DomainResolver(conf: ServiceConf) {
     }
   }
 
-  var STORE_NAME: String = "domain-store"
 
-  def supplyValueTransformer(conf: ServiceConf): ValueTransformerSupplier[ActivityEnriched, IntermediateResult[ActivityEnriched, Domain]] = ???
+
+  def supplyValueTransformer(conf: ServiceConf): ValueTransformerSupplier[ActivityEnriched, IntermediateResult[ActivityEnriched, Domain]] =
+    () => new ExtValueTransformer(conf)
 
   def createTopology(conf: ServiceConf): Topology = {
-    val monitor = new Monitor()
+    val monitor = Monitor.create()
 
     val builder = new StreamsBuilder
     val activityStream = builder.stream(conf.topics.source,
@@ -101,14 +104,12 @@ class DomainResolver(conf: ServiceConf) {
           .withLoggingEnabled(topicConfigs))
 
 
-    val activityEnriched: KStream[String, ActivityEnriched] = activities.leftJoin(domainTable,
-      (a: Activity, d: Domain) => {
-        val opt = Option(d)
-        opt match {
-          case Some(d) => ActivityEnriched(a, d.suspect)
-          case _ => ActivityEnriched(a)
-        }
-      },
+    // TODO rendere generico
+    val vj:ValueJoiner[Activity, Domain, ActivityEnriched] = (a, d) => Option(d) match {
+      case Some(d) => ActivityEnriched(a, d.suspect)
+      case None => ActivityEnriched(a)
+    }
+    val activityEnriched: KStream[String, ActivityEnriched] = activities.leftJoin(domainTable, vj,
       Joined.`with`(Serdes.String, JsonSerDes.activity(), JsonSerDes.domain()));
 
     // Controllo enrichment effettuato
@@ -132,13 +133,10 @@ class DomainResolver(conf: ServiceConf) {
     // (il dominio non è definito sullo state store) -> interrogo il sistema
     // esterno e poi salvo il dato sul topic che alimenta lo state store
 
-    val enrichNeeded = enrichBranches.get("Enrich-to-be-done")
+    val okPredicate: Predicate[String, IntermediateResult[_, _]] = (_, v) => v.state == OK
+    val koPredicate: Predicate[String, IntermediateResult[_, _]] = (_, v) => v.state == KO
+    val enrichNeededBranches = enrichBranches.get("Enrich-to-be-done")
       .transformValues(supplyValueTransformer(conf), STORE_NAME)
-
-    val okPredicate:Predicate[String, IntermediateResult[_, _]] = (_, v) => v.state == OK
-    val koPredicate:Predicate[String, IntermediateResult[_, _]] = (_, v) => v.state == KO
-
-    val enrichNeededBranches = enrichNeeded
       .split(Named.as("Client-"))
       .branch(okPredicate, Branched.as("OK"))
       .branch(koPredicate, Branched.as("KO"))
@@ -149,7 +147,7 @@ class DomainResolver(conf: ServiceConf) {
     enrichNeededBranches.get("Client-KO")
       .mapValues((v: IntermediateResult[ActivityEnriched, Domain]) => v.enrichedData.activity)
       .selectKey((_: String, v: Activity) => v.activityId)
-      .peek((_: String, v: Activity) => monitor.addDlqMessage())
+      .peek((_, _) => monitor.addDlqMessage())
       .to(conf.topics.dlq, Produced.`with`(Serdes.String, JsonSerDes.activity()))
 
     // 2b:
@@ -180,10 +178,10 @@ class DomainResolver(conf: ServiceConf) {
   protected def lookupKey(s: String, activity: Activity): String = activity.domain
 
   protected def enrichAvailable(s: String, activityEnriched: ActivityEnriched): Boolean =
-    activityEnriched.suspect != null
+    activityEnriched.lookupComplete
 
   protected def enrichRequired(s: String, activityEnriched: ActivityEnriched): Boolean =
-    activityEnriched.suspect == null
+    !activityEnriched.lookupComplete
 
   protected def enrichedStreamKey(s: String, activityEnriched: ActivityEnriched): String = activityEnriched.activity.activityId
 
@@ -203,7 +201,7 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
   var context: ProcessorContext = _
   var kvStore: KeyValueStore[String, Domain] = _
   var punctuator: Cancellable = _
-  val apiKey:String = System.getProperty("api.key")
+  val apiKey: String = System.getProperty("api.key")
 
   override def init(c: ProcessorContext): Unit = {
     context = c
@@ -248,7 +246,9 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
     override def punctuate(timestamp: Long): Unit = {
       try {
         val iter = kvStore.all
-        try while ( {iter.hasNext}) {
+        try while ( {
+          iter.hasNext
+        }) {
           val entry = iter.next
           val lastDomain = entry.value
           if (lastDomain != null) {

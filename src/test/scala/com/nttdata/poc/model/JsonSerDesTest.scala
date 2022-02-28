@@ -26,8 +26,11 @@ class JsonSerDesTest extends AnyWordSpec {
       "evaluate corretcly suspect flag" in {
         val activity = Activity("id", "user", "cn", "201", "a@b.it", "101.1.1.0", "www.a.it",
           Location("a", "b", 100.0, 200.0), "message", Instant.now().toString, "action")
-        val activityE = ActivityEnriched(activity, null)
-        assert(activityE.suspect == null)
+        val activityE1 = ActivityEnriched(activity)
+        assert(!activityE1.lookupComplete)
+
+        val activityE2 = ActivityEnriched(activity, suspect = false)
+        assert(activityE2.lookupComplete)
       }
     }
   }
