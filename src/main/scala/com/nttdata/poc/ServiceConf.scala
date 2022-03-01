@@ -14,7 +14,8 @@ case class StateStore(dir:String,
                       commitIntervalMs:Long)
 
 case class ExternalSystem(endpointUrl:String,
-                          permitsPerSecond:String)
+                          permitsPerSecond:String,
+                          payloadRequestPath:String)
 
 case class ServiceConf(bootstrapServers:String,
                        applicationId:String,

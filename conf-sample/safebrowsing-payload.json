@@ -1,0 +1,24 @@
+{
+  "client": {
+    "clientId": "yourcompanyname",
+    "clientVersion": "1.5.2"
+  },
+  "threatInfo": {
+    "threatTypes": [
+      "MALWARE",
+      "SOCIAL_ENGINEERING",
+      "THREAT_TYPE_UNSPECIFIED"
+    ],
+    "platformTypes": [
+      "ALL_PLATFORMS"
+    ],
+    "threatEntryTypes": [
+      "URL"
+    ],
+    "threatEntries": [
+      {
+        "url": "%DOMAIN%"
+      }
+    ]
+  }
+}

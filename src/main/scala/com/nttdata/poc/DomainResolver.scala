@@ -18,27 +18,28 @@ import sttp.client3.{HttpURLConnectionBackend, UriContext, basicRequest}
 
 import java.time.{Duration, Instant}
 import java.util
-import java.util.{HashMap, Map, Properties}
+import java.util.Properties
+import scala.io.Source
 
-class CustomTimestampExtractor extends TimestampExtractor {
-  override def extract(record: ConsumerRecord[AnyRef, AnyRef], partitionTime: Long): Long = {
-    val a = record.value().asInstanceOf[Activity]
-    if (a != null && a.timestamp != null) {
-      Instant.parse(a.timestamp).toEpochMilli
-    }
-    else {
-      partitionTime
-    }
-  }
-}
 
-sealed trait IntermediateResultState
+/**
+ * The actual result of the external system invocation
+ */
+sealed trait ExtSysState
 
-object OK extends IntermediateResultState
+object OK extends ExtSysState
 
-object KO extends IntermediateResultState
+object KO extends ExtSysState
 
-case class IntermediateResult[A, L](enrichedData: A, lookup: L, state: IntermediateResultState)
+/**
+ * Result of the invocation of the external system
+ * @param enrichedData the enriched data
+ * @param lookup the data to be saved in the state store
+ * @param state the state of the invocation
+ * @tparam A the enriched object
+ * @tparam L the data to be stored in the state store
+ */
+case class ExtSysResult[A, L](enrichedData: A, lookup: L, state: ExtSysState)
 
 class DomainResolver(conf: ServiceConf) {
 
@@ -64,7 +65,7 @@ class DomainResolver(conf: ServiceConf) {
 
 
 
-  def supplyValueTransformer(conf: ServiceConf): ValueTransformerSupplier[ActivityEnriched, IntermediateResult[ActivityEnriched, Domain]] =
+  def supplyValueTransformer(conf: ServiceConf): ValueTransformerSupplier[ActivityEnriched, ExtSysResult[ActivityEnriched, Domain]] =
     () => new ExtValueTransformer(conf)
 
   def createTopology(conf: ServiceConf): Topology = {
@@ -113,7 +114,7 @@ class DomainResolver(conf: ServiceConf) {
       Joined.`with`(Serdes.String, JsonSerDes.activity(), JsonSerDes.domain()));
 
     // Controllo enrichment effettuato
-    // Se nello stream enriched ho suspect=null, devo fare una query sul sistema esterno
+    // Se nello stream enriched non ho il dato arricchito, devo fare una query sul sistema esterno
     // e poi scrivere sul topic di lookup per aggiornare lo State Store
 
     val enrichBranches = activityEnriched.split(Named.as("Enrich-"))
@@ -124,7 +125,7 @@ class DomainResolver(conf: ServiceConf) {
     // Caso 1
     // Enrichment presente, posso scrivere direttamente sul topic destinazione,
     // ma devo fare una rekey per riportare la chiave al valore iniziale "activityId"
-    enrichBranches.get("Enrich-done").selectKey(this.enrichedStreamKey)
+    enrichBranches.get("Enrich-done").selectKey(enrichedStreamKey)
       .peek((_, _) => monitor.addMessageProcessed())
       .to(conf.topics.dest, Produced.`with`(Serdes.String, JsonSerDes.activityEnriched()))
 
@@ -133,8 +134,8 @@ class DomainResolver(conf: ServiceConf) {
     // (il dominio non è definito sullo state store) -> interrogo il sistema
     // esterno e poi salvo il dato sul topic che alimenta lo state store
 
-    val okPredicate: Predicate[String, IntermediateResult[_, _]] = (_, v) => v.state == OK
-    val koPredicate: Predicate[String, IntermediateResult[_, _]] = (_, v) => v.state == KO
+    val okPredicate: Predicate[String, ExtSysResult[_, _]] = (_, v) => v.state == OK
+    val koPredicate: Predicate[String, ExtSysResult[_, _]] = (_, v) => v.state == KO
     val enrichNeededBranches = enrichBranches.get("Enrich-to-be-done")
       .transformValues(supplyValueTransformer(conf), STORE_NAME)
       .split(Named.as("Client-"))
@@ -145,7 +146,7 @@ class DomainResolver(conf: ServiceConf) {
     // 2a:
     // se l'interrogazione al sistema esterno fallisce, il record originale va in DLQ
     enrichNeededBranches.get("Client-KO")
-      .mapValues((v: IntermediateResult[ActivityEnriched, Domain]) => v.enrichedData.activity)
+      .mapValues((v: ExtSysResult[ActivityEnriched, Domain]) => v.enrichedData.activity)
       .selectKey((_: String, v: Activity) => v.activityId)
       .peek((_, _) => monitor.addDlqMessage())
       .to(conf.topics.dlq, Produced.`with`(Serdes.String, JsonSerDes.activity()))
@@ -175,18 +176,18 @@ class DomainResolver(conf: ServiceConf) {
   protected def enrichTriggered(s: String, a: Activity): Boolean =
     a.domain != null && a.domain.trim.nonEmpty
 
-  protected def lookupKey(s: String, activity: Activity): String = activity.domain
+  protected def lookupKey(s: String, a: Activity): String = a.domain
 
-  protected def enrichAvailable(s: String, activityEnriched: ActivityEnriched): Boolean =
-    activityEnriched.lookupComplete
+  protected def enrichAvailable(s: String, ae: ActivityEnriched): Boolean =
+    ae.lookupComplete
 
-  protected def enrichRequired(s: String, activityEnriched: ActivityEnriched): Boolean =
-    !activityEnriched.lookupComplete
+  protected def enrichRequired(s: String, ae: ActivityEnriched): Boolean =
+    !ae.lookupComplete
 
-  protected def enrichedStreamKey(s: String, activityEnriched: ActivityEnriched): String = activityEnriched.activity.activityId
+  protected def enrichedStreamKey(s: String, ae: ActivityEnriched): String = ae.activity.activityId
 
   def properties(conf: ServiceConf): Properties = {
-    val properties = new Properties();
+    val properties = new Properties()
     properties.put(BOOTSTRAP_SERVERS_CONFIG, conf.bootstrapServers)
     properties.put(STATE_DIR_CONFIG, conf.stateStore.dir)
     properties.put(APPLICATION_ID_CONFIG, conf.applicationId)
@@ -199,10 +200,9 @@ class DomainResolver(conf: ServiceConf) {
  *
  * @param conf la configurazione del servizio
  */
-class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEnriched, IntermediateResult[ActivityEnriched, Domain]] {
+class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEnriched, ExtSysResult[ActivityEnriched, Domain]] {
 
-  val payload: String = "{\n" + "  \"client\": {\n" + "    \"clientId\": \"cmp\",\n" + "    \"clientVersion\": \"1.5.2\"\n" + "  },\n" + "  \"threatInfo\": {\n" + "    \"threatTypes\": [\n" + "      \"MALWARE\",\n" + "      \"SOCIAL_ENGINEERING\",\n" + "      \"THREAT_TYPE_UNSPECIFIED\"\n" + "    ],\n" + "    \"platformTypes\": [\n" + "      \"ALL_PLATFORMS\"\n" + "    ],\n" + "    \"threatEntryTypes\": [\n" + "      \"URL\"\n" + "    ],\n" + "    \"threatEntries\": [\n" + "      {\n" + "        \"url\": \"%DOMAIN%\"\n" + "      }\n" + "    ]\n" + "  }\n" + "}";
-
+  var payload: String = _
   var context: ProcessorContext = _
   var kvStore: KeyValueStore[String, Domain] = _
   var punctuator: Cancellable = _
@@ -211,11 +211,14 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
   override def init(c: ProcessorContext): Unit = {
     context = c
     kvStore = context.getStateStore("domain-store")
+    val path = Source.fromFile(conf.externalSystem.payloadRequestPath, "UTF-8")
+    payload = path.getLines.mkString
+    path.close()
     punctuator = this.context.schedule(Duration.ofMillis(conf.stateStore.ttlCheckPeriodMs),
       PunctuationType.WALL_CLOCK_TIME, new ActivityPunctuator())
   }
 
-  override def transform(activityE: ActivityEnriched): IntermediateResult[ActivityEnriched, Domain] = {
+  override def transform(activityE: ActivityEnriched): ExtSysResult[ActivityEnriched, Domain] = {
     val domainStr = activityE.activity.domain
     val opt = Option(kvStore.get(domainStr))
     opt match {
@@ -233,14 +236,15 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
             case Right(c) => !c.startsWith("{}")
             case _ => true
           }
-          IntermediateResult(activityE, Domain(domainStr, suspect, Instant.now().toString), OK)
+          ExtSysResult(activityE, Domain(domainStr, suspect, Instant.now().toString), OK)
         }
         catch {
           case _: Throwable =>
-            IntermediateResult(activityE, Domain(domainStr, suspect = true, Instant.now().toString), KO)
+            ExtSysResult(activityE, Domain(domainStr, suspect = true, Instant.now().toString), KO)
         }
       case Some(v) =>
-        IntermediateResult(activityE, v, OK)
+        // Dalla lookup qualcosa è uscito....
+        ExtSysResult(activityE, v, OK)
     }
   }
 
@@ -270,6 +274,7 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
 }
 
 object Runner {
+
   def main(a: Array[String]) = {
     val otherAppSource = ConfigSource.file(a(0))
     val res = otherAppSource.load[ServiceConf]
