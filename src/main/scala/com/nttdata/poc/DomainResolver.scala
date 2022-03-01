@@ -2,7 +2,6 @@ package com.nttdata.poc
 
 import com.nttdata.poc.model.{Activity, ActivityEnriched, Domain, JsonSerDes}
 import com.typesafe.scalalogging.Logger
-import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.KafkaStreams.State.REBALANCING
@@ -20,6 +19,7 @@ import java.time.{Duration, Instant}
 import java.util
 import java.util.Properties
 import scala.io.Source
+import scala.language.reflectiveCalls
 
 
 /**
@@ -209,13 +209,14 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
   val apiKey: String = System.getProperty("api.key")
 
   override def init(c: ProcessorContext): Unit = {
+    import Control._
+
     context = c
     kvStore = context.getStateStore("domain-store")
-    val path = Source.fromFile(conf.externalSystem.payloadRequestPath, "UTF-8")
-    payload = path.getLines.mkString
-    path.close()
     punctuator = this.context.schedule(Duration.ofMillis(conf.stateStore.ttlCheckPeriodMs),
       PunctuationType.WALL_CLOCK_TIME, new ActivityPunctuator())
+
+    payload = using(Source.fromFile(conf.externalSystem.payloadRequestPath, "UTF-8")) { _.getLines.mkString }
   }
 
   override def transform(activityE: ActivityEnriched): ExtSysResult[ActivityEnriched, Domain] = {

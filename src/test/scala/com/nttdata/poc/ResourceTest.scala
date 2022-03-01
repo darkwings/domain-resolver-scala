@@ -1,4 +1,4 @@
-package com.nttdata.poc.model
+package com.nttdata.poc
 
 import org.scalatest.wordspec.AnyWordSpec
 
