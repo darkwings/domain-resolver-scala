@@ -9,7 +9,7 @@ import org.apache.kafka.streams.StreamsConfig.{APPLICATION_ID_CONFIG, BOOTSTRAP_
 import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD
 import org.apache.kafka.streams.kstream.{Branched, Consumed, Joined, KStream, KTable, Materialized, Named, Predicate, Produced, ValueJoiner, ValueTransformer, ValueTransformerSupplier}
 import org.apache.kafka.streams.processor.{Cancellable, ProcessorContext, PunctuationType, Punctuator, TimestampExtractor}
-import org.apache.kafka.streams.state.KeyValueStore
+import org.apache.kafka.streams.state.{KeyValueIterator, KeyValueStore, ValueAndTimestamp}
 import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, Topology}
 import pureconfig.ConfigSource
 import pureconfig.generic.auto._
@@ -33,9 +33,10 @@ object KO extends ExtSysState
 
 /**
  * Result of the invocation of the external system
+ *
  * @param enrichedData the enriched data
- * @param lookup the data to be saved in the state store
- * @param state the state of the invocation
+ * @param lookup       the data to be saved in the state store
+ * @param state        the state of the invocation
  * @tparam A the enriched object
  * @tparam L the data to be stored in the state store
  */
@@ -49,6 +50,7 @@ class DomainResolver(conf: ServiceConf) {
 
   def start(): Unit = {
     val streams = new KafkaStreams(createTopology(conf), properties(conf))
+    streams.setGlobalStateRestoreListener(new CustomRestoreListener())
     streams.setUncaughtExceptionHandler(_ => REPLACE_THREAD)
     streams.setStateListener((newState: KafkaStreams.State, oldState: KafkaStreams.State) => {
       logger.info("New state is {} (from {})", newState, oldState)
@@ -62,7 +64,6 @@ class DomainResolver(conf: ServiceConf) {
       streams.close()
     }
   }
-
 
 
   def supplyValueTransformer(conf: ServiceConf): ValueTransformerSupplier[ActivityEnriched, ExtSysResult[ActivityEnriched, Domain]] =
@@ -97,7 +98,7 @@ class DomainResolver(conf: ServiceConf) {
       .selectKey(lookupKey)
 
     val topicConfigs = new util.HashMap[String, String]
-    topicConfigs.put("min.insync.replicas", Integer.toString(conf.topics.minInsyncReplicas))
+    // topicConfigs.put("min.insync.replicas", Integer.toString(conf.topics.minInsyncReplicas))
 
     val domainTable: KTable[String, Domain] = builder
       .table(conf.topics.lookup, Consumed.`with`(Serdes.String, JsonSerDes.domain()),
@@ -106,7 +107,7 @@ class DomainResolver(conf: ServiceConf) {
 
 
     // TODO rendere generico
-    val vj:ValueJoiner[Activity, Domain, ActivityEnriched] = (a, d) => Option(d) match {
+    val vj: ValueJoiner[Activity, Domain, ActivityEnriched] = (a, d) => Option(d) match {
       case Some(d) => ActivityEnriched(a, d.suspect)
       case None => ActivityEnriched(a)
     }
@@ -170,21 +171,21 @@ class DomainResolver(conf: ServiceConf) {
     builder.build()
   }
 
-  protected def enrichOff(s: String, a: Activity): Boolean =
+  protected def enrichOff(k: String, a: Activity): Boolean =
     a.domain == null || a.domain.trim.isEmpty
 
-  protected def enrichTriggered(s: String, a: Activity): Boolean =
+  protected def enrichTriggered(k: String, a: Activity): Boolean =
     a.domain != null && a.domain.trim.nonEmpty
 
-  protected def lookupKey(s: String, a: Activity): String = a.domain
+  protected def lookupKey(k: String, a: Activity): String = a.domain
 
-  protected def enrichAvailable(s: String, ae: ActivityEnriched): Boolean =
+  protected def enrichAvailable(k: String, ae: ActivityEnriched): Boolean =
     ae.lookupComplete
 
-  protected def enrichRequired(s: String, ae: ActivityEnriched): Boolean =
+  protected def enrichRequired(k: String, ae: ActivityEnriched): Boolean =
     !ae.lookupComplete
 
-  protected def enrichedStreamKey(s: String, ae: ActivityEnriched): String = ae.activity.activityId
+  protected def enrichedStreamKey(k: String, ae: ActivityEnriched): String = ae.activity.activityId
 
   def properties(conf: ServiceConf): Properties = {
     val properties = new Properties()
@@ -196,7 +197,8 @@ class DomainResolver(conf: ServiceConf) {
 }
 
 /**
- * Questa classe va customizzata sulla base delle singole esigenze
+ * Questa classe va customizzata sulla base delle singole esigenze.
+ * I riferimenti precisi alle classi vanno resi generici
  *
  * @param conf la configurazione del servizio
  */
@@ -204,7 +206,7 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
 
   var payload: String = _
   var context: ProcessorContext = _
-  var kvStore: KeyValueStore[String, Domain] = _
+  var kvStore: KeyValueStore[String, ValueAndTimestamp[Domain]] = _
   var punctuator: Cancellable = _
   val apiKey: String = System.getProperty("api.key")
 
@@ -216,7 +218,9 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
     punctuator = this.context.schedule(Duration.ofMillis(conf.stateStore.ttlCheckPeriodMs),
       PunctuationType.WALL_CLOCK_TIME, new ActivityPunctuator())
 
-    payload = using(Source.fromFile(conf.externalSystem.payloadRequestPath, "UTF-8")) { _.getLines.mkString }
+    payload = using(Source.fromFile(conf.externalSystem.payloadRequestPath, "UTF-8")) {
+      _.getLines.mkString
+    }
   }
 
   override def transform(activityE: ActivityEnriched): ExtSysResult[ActivityEnriched, Domain] = {
@@ -226,7 +230,9 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
       case None =>
         try {
           val p = payload.replaceAll("%DOMAIN%", domainStr)
-          val url = conf.externalSystem.endpointUrl.replaceAll("%APIKEY%", apiKey)
+
+          //val url = conf.externalSystem.endpointUrl.replaceAll("%APIKEY%", apiKey)
+          val url = conf.externalSystem.endpointUrl
           val request = basicRequest
             .body(p)
             .acceptEncoding("application/json")
@@ -245,7 +251,7 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
         }
       case Some(v) =>
         // Dalla lookup qualcosa è uscito....
-        ExtSysResult(activityE, v, OK)
+        ExtSysResult(activityE, v.value(), OK)
     }
   }
 
@@ -254,29 +260,48 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
   }
 
   class ActivityPunctuator extends Punctuator {
-    override def punctuate(timestamp: Long): Unit = {
+    val logger: Logger = Logger("ActivityPunctuator")
+
+    // TODO generalizzare permettendo di utilizzare classi che
+    def process(iter: KeyValueIterator[String, ValueAndTimestamp[Domain]]): Int = {
+      var counter = 0
       try {
-        val iter = kvStore.all
-        try while ( {
+        while ( {
           iter.hasNext
         }) {
           val entry = iter.next
           val lastDomain = entry.value
           if (lastDomain != null) {
-            val lastUpdated = Instant.parse(lastDomain.timestamp)
-            val millisFromLastUpdate = Duration.between(lastUpdated, Instant.now).toMillis
-            if (millisFromLastUpdate >= conf.stateStore.ttlMs) kvStore.delete(entry.key)
+            logger.info("[TTL] Checking {}", entry.key)
+            val lastUpdated = lastDomain.timestamp()
+            val millisFromLastUpdate = Instant.now.toEpochMilli - lastUpdated
+            if (millisFromLastUpdate >= conf.stateStore.ttlMs) {
+              logger.info("[TTL] Removing {} from store", entry.key)
+              kvStore.delete(entry.key)
+              counter += 1
+            }
           }
         }
-        finally if (iter != null) iter.close()
+        counter
       }
+      catch {
+        case e: Throwable => logger.error("Failed to perform scheduled task", e)
+          counter
+      }
+    }
+
+    override def punctuate(timestamp: Long): Unit = {
+      import Control._
+      val iter = kvStore.all
+      val count = using(iter){process}
+      logger.info("Deleted {} record from local state store", count)
     }
   }
 }
 
 object Runner {
 
-  def main(a: Array[String]) = {
+  def main(a: Array[String]): Unit = {
     val otherAppSource = ConfigSource.file(a(0))
     val res = otherAppSource.load[ServiceConf]
     res match {
