@@ -11,7 +11,11 @@ class Monitor extends MonitorMBean {
 
   private var rebalance = 0
   private var dlqMessages = 0
+  private var retryMessages = 0
+  private var cacheMiss = 0
   private var messageProcessed = 0L
+
+
   private val startTime = 0L
 
   private var windowStart = System.nanoTime
@@ -49,6 +53,14 @@ class Monitor extends MonitorMBean {
   } catch {
     case _: Exception => 0L
   }
+
+  override def addRetryMessage(): Unit = retryMessages += 1
+
+  override def getRetryMessage: Int = retryMessages
+
+  override def addCacheMiss(): Unit = cacheMiss += 1
+
+  override def getCacheMiss: Int = cacheMiss
 }
 
 object Monitor {

@@ -9,11 +9,10 @@ import java.time.Instant
 class CustomTimestampExtractor extends TimestampExtractor {
   override def extract(record: ConsumerRecord[AnyRef, AnyRef], partitionTime: Long): Long = {
     val a = record.value().asInstanceOf[Activity]
-    if (a != null && a.timestamp != null) {
-      Instant.parse(a.timestamp).toEpochMilli
-    }
-    else {
-      partitionTime
+    val ts = Option(a).flatMap(r => r.optTimestamp)
+    ts match {
+      case Some(v) => Instant.parse(v).toEpochMilli
+      case None => partitionTime
     }
   }
 }

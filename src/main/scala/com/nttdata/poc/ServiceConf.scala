@@ -4,6 +4,7 @@ case class Topics(source:String,
                   dest: String,
                   lookup: String,
                   dlq:String,
+                  retry: String,
                   minInsyncReplicas:Int)
 
 case class StateStore(dir:String,

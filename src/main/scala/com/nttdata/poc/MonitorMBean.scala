@@ -2,6 +2,14 @@ package com.nttdata.poc
 
 trait MonitorMBean {
 
+  def addRetryMessage(): Unit
+
+  def getRetryMessage: Int
+
+  def addCacheMiss(): Unit
+
+  def getCacheMiss: Int
+
   def addRebalance(): Unit
 
   def getRebalance: Integer

@@ -26,9 +26,7 @@ import scala.language.reflectiveCalls
  * The actual result of the external system invocation
  */
 sealed trait ExtSysState
-
 object OK extends ExtSysState
-
 object KO extends ExtSysState
 
 /**
@@ -47,14 +45,16 @@ class DomainResolver(conf: ServiceConf) {
   val logger: Logger = Logger("DomainResolver")
   val STORE_NAME: String = "domain-store"
 
-
   def start(): Unit = {
-    val streams = new KafkaStreams(createTopology(conf), properties(conf))
+    val monitor = Monitor.create()
+
+    val streams = new KafkaStreams(createTopology(conf, monitor), properties(conf))
     streams.setGlobalStateRestoreListener(new CustomRestoreListener())
     streams.setUncaughtExceptionHandler(_ => REPLACE_THREAD)
     streams.setStateListener((newState: KafkaStreams.State, oldState: KafkaStreams.State) => {
       logger.info("New state is {} (from {})", newState, oldState)
       if (newState eq REBALANCING) {
+        monitor.addRebalance()
         logger.info("Started rebalancing")
       }
     })
@@ -69,8 +69,7 @@ class DomainResolver(conf: ServiceConf) {
   def supplyValueTransformer(conf: ServiceConf): ValueTransformerSupplier[ActivityEnriched, ExtSysResult[ActivityEnriched, Domain]] =
     () => new ExtValueTransformer(conf)
 
-  def createTopology(conf: ServiceConf): Topology = {
-    val monitor = Monitor.create()
+  def createTopology(conf: ServiceConf, monitor: Monitor): Topology = {
 
     val builder = new StreamsBuilder
     val activityStream = builder.stream(conf.topics.source,
@@ -80,7 +79,7 @@ class DomainResolver(conf: ServiceConf) {
     val activityBranched = activityStream.split(Named.as("Activity-"))
       .branch(enrichOff, Branched.as("dlq"))
       .branch(enrichTriggered, Branched.as("enrich-triggered"))
-      .defaultBranch(Branched.as("undefined"));
+      .defaultBranch(Branched.as("undefined"))
 
     // ======================================================================================
     // Se il dominio non è presente nel dato entrante,
@@ -138,6 +137,7 @@ class DomainResolver(conf: ServiceConf) {
     val okPredicate: Predicate[String, ExtSysResult[_, _]] = (_, v) => v.state == OK
     val koPredicate: Predicate[String, ExtSysResult[_, _]] = (_, v) => v.state == KO
     val enrichNeededBranches = enrichBranches.get("Enrich-to-be-done")
+      .peek((_, _) => monitor.addCacheMiss())
       .transformValues(supplyValueTransformer(conf), STORE_NAME)
       .split(Named.as("Client-"))
       .branch(okPredicate, Branched.as("OK"))
@@ -148,9 +148,9 @@ class DomainResolver(conf: ServiceConf) {
     // se l'interrogazione al sistema esterno fallisce, il record originale va in DLQ
     enrichNeededBranches.get("Client-KO")
       .mapValues((v: ExtSysResult[ActivityEnriched, Domain]) => v.enrichedData.activity)
+      .peek((_, _) => monitor.addRetryMessage())
       .selectKey((_: String, v: Activity) => v.activityId)
-      .peek((_, _) => monitor.addDlqMessage())
-      .to(conf.topics.dlq, Produced.`with`(Serdes.String, JsonSerDes.activity()))
+      .to(conf.topics.retry, Produced.`with`(Serdes.String, JsonSerDes.activity()))
 
     // 2b:
     // interrogazione OK di sistema esterno.
@@ -232,12 +232,11 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
           val p = payload.replaceAll("%DOMAIN%", domainStr)
 
           //val url = conf.externalSystem.endpointUrl.replaceAll("%APIKEY%", apiKey)
-          val url = conf.externalSystem.endpointUrl
           val request = basicRequest
             .body(p)
             .acceptEncoding("application/json")
             .contentType("application/json")
-            .post(uri"$url")
+            .post(uri"${conf.externalSystem.endpointUrl}")
           val response = request.send(HttpURLConnectionBackend())
           val suspect = response.body match {
             case Right(c) => !c.startsWith("{}")
@@ -262,7 +261,6 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
   class ActivityPunctuator extends Punctuator {
     val logger: Logger = Logger("ActivityPunctuator")
 
-    // TODO generalizzare permettendo di utilizzare classi che
     def process(iter: KeyValueIterator[String, ValueAndTimestamp[Domain]]): Int = {
       var counter = 0
       try {
@@ -270,16 +268,18 @@ class ExtValueTransformer(conf: ServiceConf) extends ValueTransformer[ActivityEn
           iter.hasNext
         }) {
           val entry = iter.next
-          val lastDomain = entry.value
-          if (lastDomain != null) {
-            logger.info("[TTL] Checking {}", entry.key)
-            val lastUpdated = lastDomain.timestamp()
-            val millisFromLastUpdate = Instant.now.toEpochMilli - lastUpdated
-            if (millisFromLastUpdate >= conf.stateStore.ttlMs) {
-              logger.info("[TTL] Removing {} from store", entry.key)
-              kvStore.delete(entry.key)
-              counter += 1
-            }
+          val lastDomain = Option(entry.value)
+          lastDomain match {
+            case Some(v) =>
+              logger.info("[TTL] Checking {}", entry.key)
+              val lastUpdated = v.timestamp()
+              val millisFromLastUpdate = Instant.now.toEpochMilli - lastUpdated
+              if (millisFromLastUpdate >= conf.stateStore.ttlMs) {
+                logger.info("[TTL] Removing {} from store", entry.key)
+                kvStore.delete(entry.key)
+                counter += 1
+              }
+            case None => logger.info("No value") // Should not happen anyway
           }
         }
         counter

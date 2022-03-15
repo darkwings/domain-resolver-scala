@@ -24,7 +24,10 @@ case class Activity(@(SerializedName @scala.annotation.meta.field)("ACTIVITYID")
                     @(SerializedName @scala.annotation.meta.field)("LOCATION") location: Location,
                     @(SerializedName @scala.annotation.meta.field)("MESSAGE") message: String,
                     @(SerializedName @scala.annotation.meta.field)("DATE") timestamp: String,
-                    @(SerializedName @scala.annotation.meta.field)("ACTION") action:String)
+                    @(SerializedName @scala.annotation.meta.field)("ACTION") action:String) {
+
+  def optTimestamp: Option[String] = Option(timestamp)
+}
 
 
 
